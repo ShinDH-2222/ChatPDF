@@ -11,6 +11,7 @@ from langchain_openai import ChatOpenAI
 from langchain_classic import hub
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from langchain_core.callbacks.base import BaseCallbackHandler
 import chromadb
 import streamlit as st
 import tempfile
@@ -58,6 +59,15 @@ if uploaded_file is not None:
     chromadb.api.client.SharedSystemClient.clear_system_cache() # Chroma DB의 시스템 캐시를 지웁니다. (선택 사항)
     DB = Chroma.from_documents(texts, embeddings_model)
 
+    # 스트리밍 처리할 Handler 생성
+    class StreamHandler(BaseCallbackHandler):
+        def __init__(self, container, initial_text=""):
+            self.container = container
+            self.text = initial_text
+        def on_llm_new_token(self, token: str, **kwargs) -> None:
+            self.text += token
+            self.container.markdown(self.text)
+
     # User Input
     st.header("PDF에게 질문해보세요!!")
     question = st.text_input("질문을 입력하세요: ")
@@ -74,15 +84,20 @@ if uploaded_file is not None:
             # Prompt Template
             prompt = hub.pull("rlm/rag-prompt") # RAG (Retrieval-Augmented Generation) 프롬프트 템플릿을 허브에서 가져옵니다. 
 
-            # Generate
+            # Generate 
+            chat_box = st.empty() # 답변이 출력될 컨테이너를 생성합니다.
+            stream_handler = StreamHandler(chat_box) # 스트리밍 핸들러를 생성하여 답변이 출력될 컨테이너를 전달합니다.
+            generate_llm = ChatOpenAI(temperature=0,
+                                      streaming= True,
+                                      callbacks=[stream_handler]) # 답변을 생성할 LLM을 생성할 때 스트리밍 핸들러를 콜백으로 전달합니다.
+
             def format_docs(docs):
                 return "\n\n".join([doc.page_content for doc in docs]) # 객체 문서를 하나의 문자열로 합치는 함수입니다.
             rag_chain = (
                 {"context" : retriever_from_llm | format_docs, # retriever_from_llm이 반환하는 객체 문서 리스트를 format_docs 함수를 통해 하나의 문자열로 변환하여 context로 사용합니다.
                 "question" : RunnablePassthrough()} # question은 그대로 전달하는 RunnablePassthrough로 설정합니다.
-                | prompt | llm | StrOutputParser()
+                | prompt | generate_llm | StrOutputParser()
             )
 
             # 질문에 대한 답변 생성
             result = rag_chain.invoke(question)
-            st.write(result)
